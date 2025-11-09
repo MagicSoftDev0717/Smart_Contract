@@ -1,4 +1,4 @@
-# Smart_Contract
+# Smart_Contract For Token+Presale
 This is a smart contract for token+presale
 # Presale-Lite (Milestone 1)
 
