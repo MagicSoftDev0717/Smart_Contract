@@ -4,7 +4,10 @@
   "description": "This is a smart contract for token+presale",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "hardhat compile",
+    "clean": "hardhat clean",
+    "lint": "echo \"(optional) add solhint/prettier here\" && exit 0"
   },
   "repository": {
     "type": "git",
@@ -20,5 +23,8 @@
   "homepage": "https://github.com/MagicSoftDev0717/Smart_Contract#readme",
   "devDependencies": {
     "hardhat": "^2.27.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.4.0"
   }
 }
