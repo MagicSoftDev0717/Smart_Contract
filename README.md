@@ -1,6 +1,6 @@
 # Smart_Contract For Token+Presale
 This is a smart contract for token+presale
-# Presale-Lite (Milestone 1)
+# Initial (Milestone 1)
 
 • Complete ERC20 token contract and presale contract code structure in a Hardhat project.
 • Contracts compile successfully with no errors.
