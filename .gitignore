@@ -138,3 +138,6 @@ dist
 # others
 .proposal
 
+/artifacts
+/cache
+/proposal
