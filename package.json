@@ -22,9 +22,12 @@
   },
   "homepage": "https://github.com/MagicSoftDev0717/Smart_Contract#readme",
   "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^6.1.0",
     "hardhat": "^2.27.0"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "^5.4.0"
+    "@openzeppelin/contracts": "^5.4.0",
+    "dotenv": "^17.2.3",
+    "solc": "^0.8.7-fixed"
   }
 }

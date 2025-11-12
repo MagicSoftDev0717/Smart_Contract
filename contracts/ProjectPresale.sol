@@ -55,7 +55,7 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     uint256 public totalTokenSold;
     uint256 public totalUsdRaised;
     uint256 public uniqueBuyers;
-    uint256 public minUsdPurchase = 50 * 1e18; // $50 minimum
+    uint256 public minUsdPurchase = 25 * 1e18; // $50 minimum
 
     // user accounting
     mapping(address => uint256) public purchased;
