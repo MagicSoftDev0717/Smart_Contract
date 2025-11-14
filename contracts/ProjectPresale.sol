@@ -65,11 +65,31 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     uint256 public minUsdPurchase = 25 * 1e18; // $50 minimum
 
     // user accounting
-    mapping(address => uint256) public purchased;
-    mapping(address => bool) public isBuyer;
+    // mapping(address => uint256) public purchased;
+    // mapping(address => bool) public isBuyer;
+
+    // after
+    mapping(address => uint256) private purchased;
+    mapping(address => bool) private isBuyer;
 
     bool public claimEnabled;
     bool public globalPause;
+
+    ///////////////////////////
+    // Modes for event verbosity
+    enum EventsMode {
+        Detailed,
+        Compact,
+        Minimal
+    }
+    EventsMode public eventsMode;
+
+    event EventsModeChanged(EventsMode mode);
+
+    function setEventsMode(EventsMode mode) external onlyOwner {
+        eventsMode = mode;
+        emit EventsModeChanged(mode);
+    }
 
     /*──────────────────────────────
                 EVENTS
@@ -132,11 +152,71 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     );
     event UnsoldTokensRescued(uint256 amount);
 
+    // Add compact events (no arrays)
+    event TokensBought(
+        address indexed buyer,
+        address paymentToken, // address(0) for ETH
+        uint256 payAmount, // wei or USDT units
+        uint256 totalUsdSpent,
+        uint256 totalTokens
+    );
+
+    event TokensBoughtAndStaked(
+        address indexed buyer,
+        address paymentToken,
+        uint256 payAmount,
+        uint256 totalUsdSpent,
+        uint256 totalTokens
+    );
+
     error ZeroAddress();
+    error Range(uint256 i);
+    error Same();
     error Paused();
     error BelowMin();
     error NoStakeManager();
     error ClaimOff();
+    error BadStage(); // usdPerToken==0 or capTokens==0
+
+    error DebugDisabled();
+
+    function getMyClaimable() external view returns (uint256) {
+        return purchased[msg.sender];
+    }
+
+    function getMySummary()
+        external
+        view
+        returns (
+            uint256 claimable,
+            bool hasPurchased,
+            uint256 totalSold,
+            uint256 totalUsd
+        )
+    {
+        claimable = purchased[msg.sender];
+        hasPurchased = isBuyer[msg.sender];
+        totalSold = totalTokenSold;
+        totalUsd = totalUsdRaised;
+    }
+
+    // Optional support view for customer service / ops
+    function getUserSummary(
+        address user
+    ) external view onlyOwner returns (uint256 claimable, bool hasPurchased) {
+        claimable = purchased[user];
+        hasPurchased = isBuyer[user];
+    }
+
+    //////////
+    bool public debugViewsEnabled;
+
+    event DebugViewsToggled(bool enabled);
+
+    function setDebugViews(bool v) external onlyOwner {
+        debugViewsEnabled = v;
+        emit DebugViewsToggled(v);
+    }
 
     /*──────────────────────────────
             INITIALIZATION
@@ -182,19 +262,24 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
             ADMIN CONFIG
     ──────────────────────────────*/
     function setTreasury(address t) external onlyOwner {
-        require(t != address(0), "zero");
+        // require(t != address(0), "zero");
+        if (t == address(0)) revert ZeroAddress();
         treasury = t;
         emit TreasuryChanged(t);
     }
 
     function setOracle(address o) external onlyOwner {
-        require(o != address(0), "zero");
+        // require(o != address(0), "zero");
+        if (o == address(0)) revert ZeroAddress();
+        if (o == address(oracle)) return;
         oracle = IAggregatorV3(o);
         emit OracleChanged(o);
     }
 
     function setToken(address t) external onlyOwner {
-        require(t != address(0), "zero");
+        // require(t != address(0), "zero");
+        if (t == address(0)) revert ZeroAddress();
+        if (t == address(token)) return;
         token = IERC20(t);
         tokenDecimals = IERC20Metadata(t).decimals();
         scale = 10 ** tokenDecimals;
@@ -202,14 +287,18 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     }
 
     function setUsdt(address u) external onlyOwner {
-        require(u != address(0), "zero");
+        // require(u != address(0), "zero");
+        if (u == address(0)) revert ZeroAddress();
+        if (u == address(usdt)) return;
         usdt = IERC20(u);
         usdtDecimals = IERC20Metadata(u).decimals();
         emit UsdtChanged(u);
     }
 
     function setStakingManager(address mgr) external onlyOwner {
-        require(mgr != address(0), "zero");
+        // require(mgr != address(0), "zero");
+        if (mgr == address(0)) revert ZeroAddress();
+        if (mgr == address(stakingManager)) return;
         stakingManager = IStakingManager(mgr);
         IERC20(token).approve(mgr, type(uint256).max);
         emit StakingManagerSet(mgr);
@@ -234,7 +323,8 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
            STAGE MANAGEMENT
     ──────────────────────────────*/
     function addStage(Stage calldata s) external onlyOwner {
-        require(s.usdPerToken > 0 && s.capTokens > 0, "bad");
+        // require(s.usdPerToken > 0 && s.capTokens > 0, "bad");
+        if (s.usdPerToken == 0 || s.capTokens == 0) revert BadStage();
         _stages.push(s);
         emit StageAdded(_stages.length - 1, s.usdPerToken, s.capTokens);
     }
@@ -267,40 +357,52 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     }
     ////////////////////////////////////////////
     function updateStage(uint256 i, Stage calldata s) external onlyOwner {
-        require(i < _stages.length, "range");
+        // require(i < _stages.length, "range");
+        if (i >= _stages.length) revert Range(i);
         _stages[i] = s;
         emit StageUpdated(i, s.usdPerToken, s.capTokens);
     }
 
     function pauseStage(uint256 i, bool v) external onlyOwner {
-        require(i < _stages.length, "range");
+        // require(i < _stages.length, "range");
+        if (i >= _stages.length) revert Range(i);
         _stages[i].paused = v;
         emit StagePaused(i, v);
     }
 
     /// @notice Manually advance to another valid stage if operations require.
     function manualAdvance(uint256 newStage) external onlyOwner {
-        require(newStage < _stages.length, "range");
-        require(newStage != currentStage, "same");
+        // require(newStage < _stages.length, "range");
+        // require(newStage != currentStage, "same");
+        uint256 cur = currentStage;
+        if (newStage >= _stages.length) revert Range(newStage);
+        if (newStage == cur) revert Same();
         // avoid jumping forward while current stage still active and not complete
         if (newStage > currentStage) {
-            Stage storage cur = _stages[currentStage];
-            require(
-                (cur.endTime != 0 && block.timestamp >= cur.endTime) ||
-                    cur.soldTokens >= cur.capTokens ||
-                    (cur.maxUsdRaise > 0 && cur.usdRaised >= cur.maxUsdRaise),
-                "current active"
-            );
+            Stage storage s = _stages[cur];
+            // require(
+            //     (cur.endTime != 0 && block.timestamp >= cur.endTime) ||
+            //         cur.soldTokens >= cur.capTokens ||
+            //         (cur.maxUsdRaise > 0 && cur.usdRaised >= cur.maxUsdRaise),
+            //     "current active"
+            // );
+            bool reachedCap = s.soldTokens >= s.capTokens;
+            bool reachedUsd = (s.maxUsdRaise > 0 &&
+                s.usdRaised >= s.maxUsdRaise);
+            if (!reachedCap && !reachedUsd) revert BadStage(); // “current still active”
         }
         emit StageManuallyAdvanced(currentStage, newStage);
         currentStage = newStage;
     }
 
     function stagesCount() external view returns (uint256) {
+        if (!debugViewsEnabled) revert DebugDisabled();
         return _stages.length;
     }
 
     function getStage(uint256 i) external view returns (Stage memory) {
+        if (!debugViewsEnabled) revert DebugDisabled();
+        if (i >= _stages.length) revert Range(i);
         return _stages[i];
     }
 
@@ -409,7 +511,8 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     function buyWithEth(bool stake) external payable nonReentrant {
         // require(!globalPause, "paused");
         if (globalPause) revert Paused();
-        require(msg.value > 0, "no eth");
+        // require(msg.value > 0, "no eth");
+        if (msg.value == 0) revert BelowMin();
 
         uint256 usdAmount = _ethToUsd(msg.value);
         // require(usdAmount >= minUsdPurchase, "below min");
@@ -563,12 +666,28 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         uint256 i = currentStage;
         uint256 n = _stages.length;
         uint256 remaining = usdBudget;
+        //--add new for gas save for 2 --////
+        uint256 _scale = scale; // cache once
+
+        // Upper-bound arrays (n). We'll fill [0..touches) and then shrink by copying.
+        // uint256[] memory stageIdxTmp = new uint256[](n);
+        // uint256[] memory usdPartsTmp = new uint256[](n);
+        // uint256[] memory tokenPartsTmp = new uint256[](n);
+
+        // Pre-allocate at upper bound; we’ll truncate at the end.
+        stageIdx = new uint256[](n);
+        usdParts = new uint256[](n);
+        tokenParts = new uint256[](n);
         uint256 touches;
 
         while (i < n && remaining > 0) {
+            // Use a STORAGE reference once per stage. We read each field once.
             Stage memory s = _stages[i];
             if (s.paused) {
-                ++i;
+                // ++i;
+                unchecked {
+                    ++i;
+                }
                 continue;
             }
             /////////--Add new remove for M2--//////////
@@ -580,7 +699,10 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
 
             uint256 leftTokens = s.capTokens - s.soldTokens;
             if (leftTokens == 0) {
-                ++i;
+                // ++i;
+                unchecked {
+                    ++i;
+                }
                 continue;
             }
 
@@ -592,81 +714,119 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
             uint256 usdThisStage = remaining < stageLeftUsd
                 ? remaining
                 : stageLeftUsd;
-            uint256 tokensThisStage = (usdThisStage * scale) / s.usdPerToken;
+            // uint256 tokensThisStage = (usdThisStage * _scale) / s.usdPerToken;
+            uint256 tokensThisStage = _tokensFromUsd(
+                usdThisStage,
+                s.usdPerToken,
+                _scale
+            );
 
             if (tokensThisStage > leftTokens) {
                 tokensThisStage = leftTokens;
-                usdThisStage = (tokensThisStage * s.usdPerToken) / scale;
+                usdThisStage = (tokensThisStage * s.usdPerToken) / _scale;
             }
             if (tokensThisStage == 0) break;
 
-            ++touches;
-            remaining -= usdThisStage;
-            ++i;
-        }
-        require(touches > 0, "sold out");
+            // Write directly into the temp arrays at index = touches
+            // stageIdxTmp[touches] = i;
+            // usdPartsTmp[touches] = usdThisStage;
+            // tokenPartsTmp[touches] = tokensThisStage;
 
-        // Second pass: fill arrays
-        stageIdx = new uint256[](touches);
-        usdParts = new uint256[](touches);
-        tokenParts = new uint256[](touches);
-
-        i = currentStage;
-        n = _stages.length;
-        remaining = usdBudget;
-        uint256 k;
-
-        while (i < n && remaining > 0 && k < touches) {
-            Stage memory s = _stages[i];
-            if (s.paused) {
-                ++i;
-                continue;
-            }
-            /////////--Add new remove for M2--//////////
-            // if (s.endTime != 0 && block.timestamp > s.endTime) {
-            //     ++i;
-            //     continue;
-            // }
-            // if (s.startTime != 0 && block.timestamp < s.startTime) break;
-
-            uint256 leftTokens = s.capTokens - s.soldTokens;
-            if (leftTokens == 0) {
-                ++i;
-                continue;
-            }
-
-            uint256 stageLeftUsd = (s.maxUsdRaise > 0 &&
-                s.usdRaised < s.maxUsdRaise)
-                ? (s.maxUsdRaise - s.usdRaised)
-                : type(uint256).max;
-
-            uint256 usdThisStage = remaining < stageLeftUsd
-                ? remaining
-                : stageLeftUsd;
-            uint256 tokensThisStage = (usdThisStage * scale) / s.usdPerToken;
-
-            if (tokensThisStage > leftTokens) {
-                tokensThisStage = leftTokens;
-                usdThisStage = (tokensThisStage * s.usdPerToken) / scale;
-            }
-            if (tokensThisStage == 0) break;
-
-            stageIdx[k] = i;
-            usdParts[k] = usdThisStage;
-            tokenParts[k] = tokensThisStage;
+            // Write into prefix slot
+            stageIdx[touches] = i;
+            usdParts[touches] = usdThisStage;
+            tokenParts[touches] = tokensThisStage;
 
             totalTokens += tokensThisStage;
             usdUsedTotal += usdThisStage;
 
+            // ++touches;
             remaining -= usdThisStage;
             // ++i;
-            // ++k;
-            ////--Add new for gas save--////
             unchecked {
+                ++touches;
                 ++i;
-                ++k;
-            } // ✅ saves gas
+            }
         }
+        require(touches > 0, "sold out");
+
+        // Second pass: fill arrays
+        // stageIdx = new uint256[](touches);
+        // usdParts = new uint256[](touches);
+        // tokenParts = new uint256[](touches);
+
+        // for (uint256 k; k < touches; ) {
+        //     stageIdx[k] = stageIdxTmp[k];
+        //     usdParts[k] = usdPartsTmp[k];
+        //     tokenParts[k] = tokenPartsTmp[k];
+        //     unchecked {
+        //         ++k;
+        //     }
+        // }
+
+        // In-place truncate to 'touches' (no copy)
+        assembly {
+            mstore(stageIdx, touches)
+            mstore(usdParts, touches)
+            mstore(tokenParts, touches)
+        }
+
+        // i = currentStage;
+        // n = _stages.length;
+        // remaining = usdBudget;
+        // uint256 k;
+
+        // while (i < n && remaining > 0 && k < touches) {
+        //     Stage memory s = _stages[i];
+        //     if (s.paused) {
+        //         ++i;
+        //         continue;
+        //     }
+        //     /////////--Add new remove for M2--//////////
+        //     // if (s.endTime != 0 && block.timestamp > s.endTime) {
+        //     //     ++i;
+        //     //     continue;
+        //     // }
+        //     // if (s.startTime != 0 && block.timestamp < s.startTime) break;
+
+        //     uint256 leftTokens = s.capTokens - s.soldTokens;
+        //     if (leftTokens == 0) {
+        //         ++i;
+        //         continue;
+        //     }
+
+        //     uint256 stageLeftUsd = (s.maxUsdRaise > 0 &&
+        //         s.usdRaised < s.maxUsdRaise)
+        //         ? (s.maxUsdRaise - s.usdRaised)
+        //         : type(uint256).max;
+
+        //     uint256 usdThisStage = remaining < stageLeftUsd
+        //         ? remaining
+        //         : stageLeftUsd;
+        //     uint256 tokensThisStage = (usdThisStage * scale) / s.usdPerToken;
+
+        //     if (tokensThisStage > leftTokens) {
+        //         tokensThisStage = leftTokens;
+        //         usdThisStage = (tokensThisStage * s.usdPerToken) / scale;
+        //     }
+        //     if (tokensThisStage == 0) break;
+
+        //     stageIdx[k] = i;
+        //     usdParts[k] = usdThisStage;
+        //     tokenParts[k] = tokensThisStage;
+
+        //     totalTokens += tokensThisStage;
+        //     usdUsedTotal += usdThisStage;
+
+        //     remaining -= usdThisStage;
+        //     // ++i;
+        //     // ++k;
+        //     ////--Add new for gas save--////
+        //     unchecked {
+        //         ++i;
+        //         ++k;
+        //     } // ✅ saves gas
+        // }
     }
 
     /// @dev Apply a previously simulated allocation (mutates storage, advances stage pointer).
@@ -679,23 +839,31 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         for (uint256 k = 0; k < len; ++k) {
             uint256 i = stageIdx[k];
             Stage storage s = _stages[i];
+
             s.soldTokens += tokenParts[k];
             s.usdRaised += usdParts[k];
 
             bool reachedCap = s.soldTokens >= s.capTokens;
             bool reachedUsd = s.maxUsdRaise > 0 && s.usdRaised >= s.maxUsdRaise;
             // bool timeExpired = s.endTime > 0 && block.timestamp >= s.endTime;
-            bool timeExpired = false;
+            // bool timeExpired = false;
             if (
-                (reachedCap || reachedUsd || timeExpired) &&
-                i == currentStage &&
-                i + 1 < _stages.length
+                // (reachedCap || reachedUsd || timeExpired) &&
+                // (reachedCap || reachedUsd) && i == currentStage && i + 1 < _stages.length) {
+                (reachedCap || reachedUsd) && i == currentStage
             ) {
-                currentStage = i + 1;
-                emit StageAdvanced(currentStage);
+                // currentStage = i + 1;
+                // emit StageAdvanced(currentStage);
+                uint256 next = i + 1;
+                if (next < _stages.length) {
+                    currentStage = next;
+                    emit StageAdvanced(next);
+                }
             }
-                //--Modify for without time gating + unchecked increments for M2--////
-              unchecked { ++k; }
+            //--Modify for without time gating + unchecked increments for M2--////
+            unchecked {
+                ++k;
+            }
         }
     }
 
@@ -722,28 +890,81 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
             // require(address(stakingManager) != address(0), "no stake mgr");
             if (address(stakingManager) == address(0)) revert NoStakeManager();
             stakingManager.depositByPresale(buyer, totalTokens);
-            emit TokensBoughtAndStakedSplit(
-                buyer,
-                payToken,
-                payAmount,
-                usdUsed,
-                totalTokens,
-                idx,
-                usdParts,
-                tokenParts
-            );
+
+            //     emit TokensBoughtAndStakedSplit(
+            //         buyer,
+            //         payToken,
+            //         payAmount,
+            //         usdUsed,
+            //         totalTokens,
+            //         idx,
+            //         usdParts,
+            //         tokenParts
+            //     );
+            // } else {
+            //     purchased[buyer] += totalTokens;
+            //     emit TokensBoughtSplit(
+            //         buyer,
+            //         payToken,
+            //         payAmount,
+            //         usdUsed,
+            //         totalTokens,
+            //         idx,
+            //         usdParts,
+            //         tokenParts
+            //     );
+            // }
+
+            // Verbosity switch
+            EventsMode m = eventsMode;
+            if (m == EventsMode.Detailed) {
+                emit TokensBoughtAndStakedSplit(
+                    buyer,
+                    payToken,
+                    payAmount,
+                    usdUsed,
+                    totalTokens,
+                    idx,
+                    usdParts,
+                    tokenParts
+                );
+            } else if (m == EventsMode.Compact) {
+                emit TokensBoughtAndStaked(
+                    buyer,
+                    payToken,
+                    payAmount,
+                    usdUsed,
+                    totalTokens
+                );
+            } else {
+                // Minimal: emit nothing (or a tiny anonymous heartbeat if you prefer)
+            }
         } else {
             purchased[buyer] += totalTokens;
-            emit TokensBoughtSplit(
-                buyer,
-                payToken,
-                payAmount,
-                usdUsed,
-                totalTokens,
-                idx,
-                usdParts,
-                tokenParts
-            );
+
+            EventsMode m = eventsMode;
+            if (m == EventsMode.Detailed) {
+                emit TokensBoughtSplit(
+                    buyer,
+                    payToken,
+                    payAmount,
+                    usdUsed,
+                    totalTokens,
+                    idx,
+                    usdParts,
+                    tokenParts
+                );
+            } else if (m == EventsMode.Compact) {
+                emit TokensBought(
+                    buyer,
+                    payToken,
+                    payAmount,
+                    usdUsed,
+                    totalTokens
+                );
+            } else {
+                // Minimal: no event
+            }
         }
     }
 
@@ -758,6 +979,7 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         uint256 i = currentStage;
         uint256 n = _stages.length;
         uint256 remaining = tokensWanted;
+        uint256 _scale = scale; // cache once
 
         while (i < n && remaining > 0) {
             Stage memory s = _stages[i];
@@ -788,7 +1010,7 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
             uint256 tokensByUsdHeadroom = (stageUsdHeadroom ==
                 type(uint256).max)
                 ? leftTokens
-                : (stageUsdHeadroom * scale) / s.usdPerToken;
+                : (stageUsdHeadroom * _scale) / s.usdPerToken;
 
             uint256 takeTokens = remaining;
             if (takeTokens > leftTokens) takeTokens = leftTokens;
@@ -796,10 +1018,13 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
                 takeTokens = tokensByUsdHeadroom;
             if (takeTokens == 0) break;
 
-            uint256 usdThis = (takeTokens * s.usdPerToken) / scale;
+            uint256 usdThis = (takeTokens * s.usdPerToken) / _scale;
             usdTotal += usdThis;
             remaining -= takeTokens;
-            ++i;
+            // ++i;
+            unchecked {
+                ++i;
+            }
         }
 
         require(remaining == 0, "insufficient future stages");
@@ -872,5 +1097,27 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     function rescueUnsoldToTreasury(uint256 amount) external onlyOwner {
         IERC20(token).safeTransfer(treasury, amount);
         emit UnsoldTokensRescued(amount);
+    }
+
+    ////////////////
+    function _min(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a < b ? a : b;
+    }
+
+    function _usdFromTokens(
+        uint256 tokens,
+        uint256 usdPerToken,
+        uint256 _scale
+    ) internal pure returns (uint256) {
+        // floor division (as you already do)
+        return (tokens * usdPerToken) / _scale;
+    }
+
+    function _tokensFromUsd(
+        uint256 usd,
+        uint256 usdPerToken,
+        uint256 _scale
+    ) internal pure returns (uint256) {
+        return (usd * _scale) / usdPerToken;
     }
 }
