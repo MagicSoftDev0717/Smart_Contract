@@ -33,11 +33,11 @@ async function main() {
   if (allowance < amount) {
     console.log(`   Current allowance: ${formattedAllowance} USDT → approving now...`);
     const approveTx = await usdt.approve(PRESALE_ADDR, amount); //Grants the presale contract permission to pull amount(ex: 100) USDT from the buyer’s wallet.
-    console.log(`   🧩 Approval Tx: ${approveTx.hash}`);
+    console.log(`   Approval Tx: ${approveTx.hash}`);
     await approveTx.wait();
-    console.log("   ✅ Approval confirmed.");
+    console.log("  ✅ Approval confirmed.");
   } else {
-    console.log(`   ✅ Sufficient allowance: ${formattedAllowance} USDT`);
+    console.log(`  ✅ Sufficient allowance: ${formattedAllowance} USDT`);
   }
 
   // --- Step 3: Attempt the purchase ---
@@ -46,6 +46,23 @@ async function main() {
     const tx = await presale.buyWithUsdt(amount, STAKE);
     console.log(`   Tx hash: ${tx.hash}`);
     await tx.wait();
+    ///////--Add new for M2--////////////
+    const receipt = await tx.wait();
+    const presaleFactory = await ethers.getContractFactory("ProjectPresale");
+    const iface = presaleFactory.interface;
+
+    for (const log of receipt.logs) {
+      try {
+        const parsed = iface.parseLog(log);
+        if (parsed?.name === "TokensBoughtSplit" || parsed?.name === "TokensBoughtAndStakedSplit") {
+          const { stageIndexes, stageUsd, stageTokens } = parsed.args;
+          console.log("Stage indexes:", stageIndexes.map(n => Number(n)));
+          console.log("USD parts:", stageUsd.map(u => ethers.formatUnits(u, 18)));
+          console.log("Token parts:", stageTokens.map(t => ethers.formatUnits(t, 18)));
+        }
+      } catch (_) { }
+    }
+
     console.log("✅ Purchase confirmed successfully!");
   } catch (err) {
     console.error("\n❌ Purchase failed!");

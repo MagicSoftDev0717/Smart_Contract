@@ -2,9 +2,16 @@
 pragma solidity ^0.8.28;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {IERC20, IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {
+    ReentrancyGuard
+} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {
+    IERC20,
+    IERC20Metadata
+} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {
+    SafeERC20
+} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 interface IAggregatorV3 {
     function latestRoundData()
@@ -28,14 +35,14 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         STAGE & STATE DEFINITIONS
     ──────────────────────────────*/
     struct Stage {
-        uint256 usdPerToken;     // price per token in USD × 1e18
-        uint256 capTokens;       // max tokens for sale in this stage (token units)
-        uint256 soldTokens;      // total tokens sold so far
-        uint256 usdRaised;       // total USD raised so far
-        uint256 maxUsdRaise;     // optional max USD cap (0 = none)
-        uint64  startTime;
-        uint64  endTime;
-        bool    paused;
+        uint256 usdPerToken; // price per token in USD × 1e18
+        uint256 capTokens; // max tokens for sale in this stage (token units)
+        uint256 soldTokens; // total tokens sold so far
+        uint256 usdRaised; // total USD raised so far
+        uint256 maxUsdRaise; // optional max USD cap (0 = none)
+        uint64 startTime;
+        uint64 endTime;
+        bool paused;
     }
 
     IERC20 public token;
@@ -70,10 +77,10 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     // Split-aware buy events (arrays align by index)
     event TokensBoughtSplit(
         address indexed buyer,
-        address paymentToken,             // address(0) for ETH
-        uint256 payAmount,                // wei or USDT units
-        uint256 totalUsdSpent,            // sum of stageUsd[]
-        uint256 totalTokens,              // sum of stageTokens[]
+        address paymentToken, // address(0) for ETH
+        uint256 payAmount, // wei or USDT units
+        uint256 totalUsdSpent, // sum of stageUsd[]
+        uint256 totalTokens, // sum of stageTokens[]
         uint256[] stageIndexes,
         uint256[] stageUsd,
         uint256[] stageTokens
@@ -81,10 +88,10 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
 
     event TokensBoughtAndStakedSplit(
         address indexed buyer,
-        address paymentToken,             // address(0) for ETH
-        uint256 payAmount,                // wei or USDT units
-        uint256 totalUsdSpent,            // sum of stageUsd[]
-        uint256 totalTokens,              // sum of stageTokens[]
+        address paymentToken, // address(0) for ETH
+        uint256 payAmount, // wei or USDT units
+        uint256 totalUsdSpent, // sum of stageUsd[]
+        uint256 totalTokens, // sum of stageTokens[]
         uint256[] stageIndexes,
         uint256[] stageUsd,
         uint256[] stageTokens
@@ -105,6 +112,32 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     event StakingManagerSet(address indexed mgr);
     event MinimumPurchaseSet(uint256 newMinUsd);
 
+    /////////////--New Add for M2--//////////
+    event StageEarlyEnded(
+        uint256 indexed stageId,
+        uint256 rolloverTokens,
+        uint256 newCurrentStage
+    );
+    event StageCanceled(
+        uint256 indexed stageId,
+        uint256 rolloverTokens,
+        uint256 newCurrentStage
+    );
+    event StageAddedSimple(
+        uint256 indexed id,
+        uint256 price,
+        uint256 cap,
+        uint256 maxUsdRaise,
+        bool paused
+    );
+    event UnsoldTokensRescued(uint256 amount);
+
+    error ZeroAddress();
+    error Paused();
+    error BelowMin();
+    error NoStakeManager();
+    error ClaimOff();
+
     /*──────────────────────────────
             INITIALIZATION
     ──────────────────────────────*/
@@ -115,7 +148,18 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         address oracle_,
         Stage[] memory stages_
     ) Ownable(msg.sender) {
-        require(token_ != address(0) && usdt_ != address(0) && treasury_ != address(0), "zero");
+        // require(
+        //     token_ != address(0) &&
+        //         usdt_ != address(0) &&
+        //         treasury_ != address(0),
+        //     "zero"
+        // );
+        if (
+            treasury_ == address(0) &&
+            token_ == address(0) &&
+            usdt_ == address(0)
+        ) revert ZeroAddress();
+
         token = IERC20(token_);
         usdt = IERC20(usdt_);
         treasury = treasury_;
@@ -125,7 +169,10 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         scale = 10 ** tokenDecimals;
 
         for (uint256 i; i < stages_.length; ++i) {
-            require(stages_[i].usdPerToken > 0 && stages_[i].capTokens > 0, "stage");
+            require(
+                stages_[i].usdPerToken > 0 && stages_[i].capTokens > 0,
+                "stage"
+            );
             _stages.push(stages_[i]);
             emit StageAdded(i, stages_[i].usdPerToken, stages_[i].capTokens);
         }
@@ -191,7 +238,34 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         _stages.push(s);
         emit StageAdded(_stages.length - 1, s.usdPerToken, s.capTokens);
     }
-
+    /////--Add new for M2--///////////
+    function addStageSimple(
+        uint256 usdPerToken,
+        uint256 capTokens,
+        uint256 maxUsdRaise,
+        bool paused
+    ) external onlyOwner {
+        require(usdPerToken > 0 && capTokens > 0, "bad");
+        Stage memory s = Stage({
+            usdPerToken: usdPerToken,
+            capTokens: capTokens,
+            soldTokens: 0,
+            usdRaised: 0,
+            maxUsdRaise: maxUsdRaise,
+            startTime: 0, // ignored if you’re running quantity-only stages
+            endTime: 0, // ignored
+            paused: paused
+        });
+        _stages.push(s);
+        emit StageAddedSimple(
+            _stages.length - 1,
+            usdPerToken,
+            capTokens,
+            maxUsdRaise,
+            paused
+        );
+    }
+    ////////////////////////////////////////////
     function updateStage(uint256 i, Stage calldata s) external onlyOwner {
         require(i < _stages.length, "range");
         _stages[i] = s;
@@ -213,8 +287,8 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
             Stage storage cur = _stages[currentStage];
             require(
                 (cur.endTime != 0 && block.timestamp >= cur.endTime) ||
-                cur.soldTokens >= cur.capTokens ||
-                (cur.maxUsdRaise > 0 && cur.usdRaised >= cur.maxUsdRaise),
+                    cur.soldTokens >= cur.capTokens ||
+                    (cur.maxUsdRaise > 0 && cur.usdRaised >= cur.maxUsdRaise),
                 "current active"
             );
         }
@@ -230,58 +304,164 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         return _stages[i];
     }
 
+    ///////////--New Add for M2--//////////
+
+    function earlyEndAndRollover() external onlyOwner {
+        uint256 i = currentStage;
+        require(i < _stages.length, "no stage");
+        Stage storage cur = _stages[i];
+        require(!cur.paused, "paused");
+
+        uint256 sold = cur.soldTokens;
+        uint256 cap = cur.capTokens;
+        require(sold < cap, "nothing to end");
+
+        uint256 rollover = cap - sold;
+
+        // Lock current stage at sold = cap to mark complete
+        cur.capTokens = sold;
+
+        if (i + 1 < _stages.length) {
+            // move remaining capacity to next stage
+            _stages[i + 1].capTokens += rollover;
+            currentStage = i + 1;
+            emit StageEarlyEnded(i, rollover, currentStage);
+            emit StageAdvanced(currentStage);
+        } else {
+            // last stage: keep cap reduced; no next stage to rollover into
+            emit StageEarlyEnded(i, 0, currentStage);
+        }
+    }
+
+    function cancelCurrentStageAndContinue() external onlyOwner {
+        uint256 i = currentStage;
+        require(i < _stages.length, "no stage");
+        Stage storage cur = _stages[i];
+
+        uint256 sold = cur.soldTokens;
+        uint256 cap = cur.capTokens;
+        require(sold <= cap, "corrupt");
+        uint256 rollover = cap > sold ? (cap - sold) : 0;
+
+        // Lock current stage at sold
+        cur.capTokens = sold;
+        cur.paused = true;
+
+        if (i + 1 < _stages.length) {
+            _stages[i + 1].capTokens += rollover;
+            currentStage = i + 1;
+            emit StageCanceled(i, rollover, currentStage);
+            emit StageAdvanced(currentStage);
+        } else {
+            // last stage; just mark canceled/closed (no rollover target)
+            emit StageCanceled(i, 0, currentStage);
+        }
+    }
+    /////////////////////////////////////////////////
     /*──────────────────────────────
              BUY LOGIC
     ──────────────────────────────*/
     function buyWithUsdt(uint256 usdtAmount, bool stake) external nonReentrant {
-        require(!globalPause, "paused");
+        // require(!globalPause, "paused");
+        if (globalPause) revert Paused();
         require(usdtAmount > 0, "no usdt");
 
-        uint256 usdAmount = _toUsd(usdtAmount);
-        require(usdAmount >= minUsdPurchase, "below min");
+        ////---Modify for gas save for M2--////
+        // Cache storage variables in memory for this call
+        IERC20 _usdt = usdt;
+        address _treasury = treasury;
+        ///////////////////////////////////
 
-        (uint256 totalTokens, uint256 usdUsed, uint256[] memory idx, uint256[] memory usdParts, uint256[] memory tokenParts)
-            = _simulateAllocationUsd(usdAmount);
+        uint256 usdAmount = _toUsd(usdtAmount);
+        // require(usdAmount >= minUsdPurchase, "below min");
+        if (usdAmount < minUsdPurchase) revert BelowMin();
+        (
+            uint256 totalTokens,
+            uint256 usdUsed,
+            uint256[] memory idx,
+            uint256[] memory usdParts,
+            uint256[] memory tokenParts
+        ) = _simulateAllocationUsd(usdAmount);
 
         // apply allocation (mutates stage state)
         _applyAllocation(idx, usdParts, tokenParts);
 
         // USDT goes directly to treasury (we accept full usdtAmount since usdUsed == usdAmount here)
-        usdt.safeTransferFrom(msg.sender, treasury, usdtAmount);
+        // usdt.safeTransferFrom(msg.sender, treasury, usdtAmount);
+        //////////---Modify for gas save for M2--//////////
+        _usdt.safeTransferFrom(msg.sender, _treasury, usdtAmount);
 
-        _finalizePurchase(msg.sender, totalTokens, usdUsed, address(usdt), usdtAmount, stake, idx, usdParts, tokenParts);
+        _finalizePurchase(
+            msg.sender,
+            totalTokens,
+            usdUsed,
+            // address(usdt),
+            ////---Modify for gas save for M2--////
+            address(_usdt),
+            usdtAmount,
+            stake,
+            idx,
+            usdParts,
+            tokenParts
+        );
     }
 
     function buyWithEth(bool stake) external payable nonReentrant {
-        require(!globalPause, "paused");
+        // require(!globalPause, "paused");
+        if (globalPause) revert Paused();
         require(msg.value > 0, "no eth");
 
         uint256 usdAmount = _ethToUsd(msg.value);
-        require(usdAmount >= minUsdPurchase, "below min");
-
-        (uint256 totalTokens, uint256 usdUsed, uint256[] memory idx, uint256[] memory usdParts, uint256[] memory tokenParts)
-            = _simulateAllocationUsd(usdAmount);
+        // require(usdAmount >= minUsdPurchase, "below min");
+        if (usdAmount < minUsdPurchase) revert BelowMin();
+        (
+            uint256 totalTokens,
+            uint256 usdUsed,
+            uint256[] memory idx,
+            uint256[] memory usdParts,
+            uint256[] memory tokenParts
+        ) = _simulateAllocationUsd(usdAmount);
 
         _applyAllocation(idx, usdParts, tokenParts);
 
-        // instantly forward ETH to treasury
-        (bool ok, ) = payable(treasury).call{value: msg.value}("");
-        require(ok, "eth fwd fail");
+        //  Cache storage variables
+        address _treasury = treasury;
 
-        _finalizePurchase(msg.sender, totalTokens, usdUsed, address(0), msg.value, stake, idx, usdParts, tokenParts);
+        // instantly forward ETH to treasury
+        // (bool ok, ) = payable(treasury).call{value: msg.value}("");
+        ////---Modify for gas save for M2--////
+        (bool ok, ) = payable(_treasury).call{value: msg.value}("");
+        // require(ok, "eth fwd fail");
+
+        //----Modify for witching to custom errors for M2--////
+        if (!ok) revert(); // minimal; or define a custom error
+
+        _finalizePurchase(
+            msg.sender,
+            totalTokens,
+            usdUsed,
+            address(0),
+            msg.value,
+            stake,
+            idx,
+            usdParts,
+            tokenParts
+        );
     }
 
     /*──────────────────────────────
                 CLAIM
     ──────────────────────────────*/
     function claim(bool stake) external nonReentrant {
-        require(claimEnabled, "claim off");
+        // require(claimEnabled, "claim off");
+        if (!claimEnabled) revert ClaimOff();
         uint256 amount = purchased[msg.sender];
         require(amount > 0, "none");
         purchased[msg.sender] = 0;
 
         if (stake) {
-            require(address(stakingManager) != address(0), "no stake mgr");
+            // require(address(stakingManager) != address(0), "no stake mgr");
+            if (address(stakingManager) == address(0)) revert NoStakeManager();
             stakingManager.depositByPresale(msg.sender, amount);
             emit TokensClaimedAndStaked(msg.sender, amount);
         } else {
@@ -291,27 +471,44 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     }
 
     /*──────────────────────────────
-              PUBLIC VIEWS
+              Pulic VIEWS
     ──────────────────────────────*/
     /// @notice Accurate cross-stage quote: ETH required to acquire `tokens` given current/future stages.
-    function quoteEthForTokens(uint256 tokens) external view returns (uint256 ethRequired) {
+    function quoteEthForTokens(
+        uint256 tokens
+    ) external view returns (uint256 ethRequired) {
         uint256 usd = _quoteUsdForTokensAcrossStages(tokens);
         ethRequired = _usdToEth(usd);
     }
 
     /// @notice Accurate cross-stage quote: USDT required to acquire `tokens` given current/future stages.
-    function quoteUsdtForTokens(uint256 tokens) external view returns (uint256 usdtRequired) {
+    function quoteUsdtForTokens(
+        uint256 tokens
+    ) external view returns (uint256 usdtRequired) {
         uint256 usd = _quoteUsdForTokensAcrossStages(tokens);
         usdtRequired = _usdToUsdt(usd);
     }
 
     /// @notice Given a USD budget, returns the tokens obtainable across stages (simulation).
-    function quoteTokensForUsd(uint256 usdBudget)
+    function quoteTokensForUsd(
+        uint256 usdBudget
+    )
         external
         view
-        returns (uint256 tokensOut, uint256[] memory stageIndexes, uint256[] memory stageUsd, uint256[] memory stageTokens)
+        returns (
+            uint256 tokensOut,
+            uint256[] memory stageIndexes,
+            uint256[] memory stageUsd,
+            uint256[] memory stageTokens
+        )
     {
-        (tokensOut, , stageIndexes, stageUsd, stageTokens) = _simulateAllocationUsd(usdBudget);
+        (
+            tokensOut,
+            ,
+            stageIndexes,
+            stageUsd,
+            stageTokens
+        ) = _simulateAllocationUsd(usdBudget);
     }
 
     function getOverallStats()
@@ -322,11 +519,36 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         return (totalTokenSold, totalUsdRaised, uniqueBuyers);
     }
 
+    //////////////////////
+    function getActiveWindow()
+        external
+        view
+        returns (
+            uint256 _current,
+            Stage memory _curStage,
+            uint256 _nextIndex,
+            Stage memory _nextStage
+        )
+    {
+        uint256 cur = currentStage;
+        _current = cur;
+        _curStage = _stages[cur];
+        uint256 nxt = cur + 1;
+        if (nxt < _stages.length) {
+            _nextIndex = nxt;
+            _nextStage = _stages[nxt];
+        }
+    }
+
+    //////
+
     /*──────────────────────────────
          ALLOCATION (SIMULATE/APPLY)
     ──────────────────────────────*/
     /// @dev Simulate allocation of a USD budget over stages (view-only). Returns arrays sized to the number of touched stages.
-    function _simulateAllocationUsd(uint256 usdBudget)
+    function _simulateAllocationUsd(
+        uint256 usdBudget
+    )
         internal
         view
         returns (
@@ -345,18 +567,31 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
 
         while (i < n && remaining > 0) {
             Stage memory s = _stages[i];
-            if (s.paused) { ++i; continue; }
-            if (s.endTime != 0 && block.timestamp > s.endTime) { ++i; continue; }
-            if (s.startTime != 0 && block.timestamp < s.startTime) break;
+            if (s.paused) {
+                ++i;
+                continue;
+            }
+            /////////--Add new remove for M2--//////////
+            // if (s.endTime != 0 && block.timestamp > s.endTime) {
+            //     ++i;
+            //     continue;
+            // }
+            // if (s.startTime != 0 && block.timestamp < s.startTime) break;
 
             uint256 leftTokens = s.capTokens - s.soldTokens;
-            if (leftTokens == 0) { ++i; continue; }
+            if (leftTokens == 0) {
+                ++i;
+                continue;
+            }
 
-            uint256 stageLeftUsd = (s.maxUsdRaise > 0 && s.usdRaised < s.maxUsdRaise)
+            uint256 stageLeftUsd = (s.maxUsdRaise > 0 &&
+                s.usdRaised < s.maxUsdRaise)
                 ? (s.maxUsdRaise - s.usdRaised)
                 : type(uint256).max;
 
-            uint256 usdThisStage = remaining < stageLeftUsd ? remaining : stageLeftUsd;
+            uint256 usdThisStage = remaining < stageLeftUsd
+                ? remaining
+                : stageLeftUsd;
             uint256 tokensThisStage = (usdThisStage * scale) / s.usdPerToken;
 
             if (tokensThisStage > leftTokens) {
@@ -372,9 +607,9 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         require(touches > 0, "sold out");
 
         // Second pass: fill arrays
-        stageIdx  = new uint256[](touches);
-        usdParts  = new uint256[](touches);
-        tokenParts= new uint256[](touches);
+        stageIdx = new uint256[](touches);
+        usdParts = new uint256[](touches);
+        tokenParts = new uint256[](touches);
 
         i = currentStage;
         n = _stages.length;
@@ -383,18 +618,31 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
 
         while (i < n && remaining > 0 && k < touches) {
             Stage memory s = _stages[i];
-            if (s.paused) { ++i; continue; }
-            if (s.endTime != 0 && block.timestamp > s.endTime) { ++i; continue; }
-            if (s.startTime != 0 && block.timestamp < s.startTime) break;
+            if (s.paused) {
+                ++i;
+                continue;
+            }
+            /////////--Add new remove for M2--//////////
+            // if (s.endTime != 0 && block.timestamp > s.endTime) {
+            //     ++i;
+            //     continue;
+            // }
+            // if (s.startTime != 0 && block.timestamp < s.startTime) break;
 
             uint256 leftTokens = s.capTokens - s.soldTokens;
-            if (leftTokens == 0) { ++i; continue; }
+            if (leftTokens == 0) {
+                ++i;
+                continue;
+            }
 
-            uint256 stageLeftUsd = (s.maxUsdRaise > 0 && s.usdRaised < s.maxUsdRaise)
+            uint256 stageLeftUsd = (s.maxUsdRaise > 0 &&
+                s.usdRaised < s.maxUsdRaise)
                 ? (s.maxUsdRaise - s.usdRaised)
                 : type(uint256).max;
 
-            uint256 usdThisStage = remaining < stageLeftUsd ? remaining : stageLeftUsd;
+            uint256 usdThisStage = remaining < stageLeftUsd
+                ? remaining
+                : stageLeftUsd;
             uint256 tokensThisStage = (usdThisStage * scale) / s.usdPerToken;
 
             if (tokensThisStage > leftTokens) {
@@ -403,15 +651,21 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
             }
             if (tokensThisStage == 0) break;
 
-            stageIdx[k]   = i;
-            usdParts[k]   = usdThisStage;
+            stageIdx[k] = i;
+            usdParts[k] = usdThisStage;
             tokenParts[k] = tokensThisStage;
 
-            totalTokens   += tokensThisStage;
-            usdUsedTotal  += usdThisStage;
+            totalTokens += tokensThisStage;
+            usdUsedTotal += usdThisStage;
 
             remaining -= usdThisStage;
-            ++i; ++k;
+            // ++i;
+            // ++k;
+            ////--Add new for gas save--////
+            unchecked {
+                ++i;
+                ++k;
+            } // ✅ saves gas
         }
     }
 
@@ -426,16 +680,22 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
             uint256 i = stageIdx[k];
             Stage storage s = _stages[i];
             s.soldTokens += tokenParts[k];
-            s.usdRaised  += usdParts[k];
+            s.usdRaised += usdParts[k];
 
             bool reachedCap = s.soldTokens >= s.capTokens;
             bool reachedUsd = s.maxUsdRaise > 0 && s.usdRaised >= s.maxUsdRaise;
-            bool timeExpired = s.endTime > 0 && block.timestamp >= s.endTime;
-
-            if ((reachedCap || reachedUsd || timeExpired) && i == currentStage && i + 1 < _stages.length) {
+            // bool timeExpired = s.endTime > 0 && block.timestamp >= s.endTime;
+            bool timeExpired = false;
+            if (
+                (reachedCap || reachedUsd || timeExpired) &&
+                i == currentStage &&
+                i + 1 < _stages.length
+            ) {
                 currentStage = i + 1;
                 emit StageAdvanced(currentStage);
             }
+                //--Modify for without time gating + unchecked increments for M2--////
+              unchecked { ++k; }
         }
     }
 
@@ -459,15 +719,30 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         totalUsdRaised += usdUsed;
 
         if (stake) {
-            require(address(stakingManager) != address(0), "no stake mgr");
+            // require(address(stakingManager) != address(0), "no stake mgr");
+            if (address(stakingManager) == address(0)) revert NoStakeManager();
             stakingManager.depositByPresale(buyer, totalTokens);
             emit TokensBoughtAndStakedSplit(
-                buyer, payToken, payAmount, usdUsed, totalTokens, idx, usdParts, tokenParts
+                buyer,
+                payToken,
+                payAmount,
+                usdUsed,
+                totalTokens,
+                idx,
+                usdParts,
+                tokenParts
             );
         } else {
             purchased[buyer] += totalTokens;
             emit TokensBoughtSplit(
-                buyer, payToken, payAmount, usdUsed, totalTokens, idx, usdParts, tokenParts
+                buyer,
+                payToken,
+                payAmount,
+                usdUsed,
+                totalTokens,
+                idx,
+                usdParts,
+                tokenParts
             );
         }
     }
@@ -476,7 +751,9 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
           CROSS-STAGE QUOTING
     ──────────────────────────────*/
     /// @dev Accurate USD needed to acquire `tokensWanted` across current/future stages.
-    function _quoteUsdForTokensAcrossStages(uint256 tokensWanted) internal view returns (uint256 usdTotal) {
+    function _quoteUsdForTokensAcrossStages(
+        uint256 tokensWanted
+    ) internal view returns (uint256 usdTotal) {
         require(tokensWanted > 0, "zero");
         uint256 i = currentStage;
         uint256 n = _stages.length;
@@ -484,26 +761,39 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
 
         while (i < n && remaining > 0) {
             Stage memory s = _stages[i];
-            if (s.paused) { ++i; continue; }
-            if (s.endTime != 0 && block.timestamp > s.endTime) { ++i; continue; }
-            if (s.startTime != 0 && block.timestamp < s.startTime) break;
+            if (s.paused) {
+                ++i;
+                continue;
+            }
+            /////////--Add new remove for M2--//////////
+            // if (s.endTime != 0 && block.timestamp > s.endTime) {
+            //     ++i;
+            //     continue;
+            // }
+            // if (s.startTime != 0 && block.timestamp < s.startTime) break;
 
             uint256 leftTokens = s.capTokens - s.soldTokens;
-            if (leftTokens == 0) { ++i; continue; }
+            if (leftTokens == 0) {
+                ++i;
+                continue;
+            }
 
             // Also respect USD headroom if maxUsdRaise is set
-            uint256 stageUsdHeadroom = (s.maxUsdRaise > 0 && s.usdRaised < s.maxUsdRaise)
+            uint256 stageUsdHeadroom = (s.maxUsdRaise > 0 &&
+                s.usdRaised < s.maxUsdRaise)
                 ? (s.maxUsdRaise - s.usdRaised)
                 : type(uint256).max;
 
             // tokens limited by USD headroom:
-            uint256 tokensByUsdHeadroom = (stageUsdHeadroom == type(uint256).max)
+            uint256 tokensByUsdHeadroom = (stageUsdHeadroom ==
+                type(uint256).max)
                 ? leftTokens
                 : (stageUsdHeadroom * scale) / s.usdPerToken;
 
             uint256 takeTokens = remaining;
             if (takeTokens > leftTokens) takeTokens = leftTokens;
-            if (takeTokens > tokensByUsdHeadroom) takeTokens = tokensByUsdHeadroom;
+            if (takeTokens > tokensByUsdHeadroom)
+                takeTokens = tokensByUsdHeadroom;
             if (takeTokens == 0) break;
 
             uint256 usdThis = (takeTokens * s.usdPerToken) / scale;
@@ -519,7 +809,7 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
               CONVERSIONS
     ──────────────────────────────*/
     function _ethToUsd(uint256 weiAmt) internal view returns (uint256) {
-        (, int256 answer,,,) = oracle.latestRoundData();
+        (, int256 answer, , , ) = oracle.latestRoundData();
         require(answer > 0, "oracle");
         uint8 d = oracle.decimals();
         uint256 price = uint256(answer);
@@ -529,7 +819,7 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     }
 
     function _usdToEth(uint256 usdAmount) internal view returns (uint256) {
-        (, int256 answer,,,) = oracle.latestRoundData();
+        (, int256 answer, , , ) = oracle.latestRoundData();
         require(answer > 0, "oracle");
         uint8 d = oracle.decimals();
         uint256 price = uint256(answer);
@@ -539,20 +829,31 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     }
 
     function _toUsd(uint256 usdtAmt) internal view returns (uint256) {
-        if (usdtDecimals < 18) return usdtAmt * (10 ** (18 - usdtDecimals));
+        // if (usdtDecimals < 18) return usdtAmt * (10 ** (18 - usdtDecimals));
+        // return usdtAmt;
+
+        ///////---Modify for gas micro-optimizations save for M2--//////////
+        uint8 d = usdtDecimals; // ✅ cache in memory once
+
+        if (d < 18) return usdtAmt * (10 ** (18 - d));
         return usdtAmt;
     }
 
     function _usdToUsdt(uint256 usdAmount) internal view returns (uint256) {
-        if (usdtDecimals < 18) return usdAmount / (10 ** (18 - usdtDecimals));
+        // if (usdtDecimals < 18) return usdAmount / (10 ** (18 - usdtDecimals));
+        // return usdAmount;
+
+        ///-----Modify for gas micro-optimizations save for M2--//////////
+        uint8 d = usdtDecimals; // ✅ cache storage value in memory once
+
+        if (d < 18) return usdAmount / (10 ** (18 - d));
         return usdAmount;
     }
 
-    function _usdOfTokens(uint256 tokens, uint256 usdPerToken)
-        internal
-        view
-        returns (uint256)
-    {
+    function _usdOfTokens(
+        uint256 tokens,
+        uint256 usdPerToken
+    ) internal view returns (uint256) {
         return (tokens * usdPerToken) / scale;
     }
 
@@ -566,5 +867,10 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     // No idle ETH: any direct transfer reverts.
     receive() external payable {
         revert("Direct ETH not accepted");
+    }
+    //////////-- New Add for M2--//////////
+    function rescueUnsoldToTreasury(uint256 amount) external onlyOwner {
+        IERC20(token).safeTransfer(treasury, amount);
+        emit UnsoldTokensRescued(amount);
     }
 }

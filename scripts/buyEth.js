@@ -34,6 +34,23 @@ async function main() {
     const tx = await presale.buyWithEth(STAKE, { value: valueWei });
     console.log(` Tx sent: ${tx.hash}`);
     await tx.wait();
+    ////Add new for M2--////////
+    const receipt = await tx.wait();
+    const presaleFactory = await ethers.getContractFactory("ProjectPresale");
+    const iface = presaleFactory.interface;
+
+    for (const log of receipt.logs) {
+      try {
+        const parsed = iface.parseLog(log);
+        if (parsed?.name === "TokensBoughtSplit" || parsed?.name === "TokensBoughtAndStakedSplit") {
+          const { stageIndexes, stageUsd, stageTokens } = parsed.args;
+          console.log("Stage indexes:", stageIndexes.map(n => Number(n)));
+          console.log("USD parts:", stageUsd.map(u => ethers.formatUnits(u, 18)));
+          console.log("Token parts:", stageTokens.map(t => ethers.formatUnits(t, 18)));
+        }
+      } catch (_) { }
+    }
+
     console.log("✅ Buy transaction confirmed.");
   } catch (err) {
     console.error("\n❌ Transaction failed.");

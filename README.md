@@ -151,9 +151,29 @@ checkStages - This script is your stage inspector. It fetches the presale’s st
             or
             node scripts/checkStats.js
 
+
+
 verifyContracts - this script is your “one-button Etherscan verifier.” It shells out to Hardhat’s verify task and is meant to verify both the token and the presale
 
             npx hardhat run scripts/checkStats.js --network sepolia
             or
             node scripts/verifyContracts.js
 
+addStageSimple - 
+                node scripts/addStageSimple.js 0.004 1000000000 0 false
+            
+rescueUnsold - 
+                node scripts/rescueUnsold.js 10000000
+
+earlyEndAndRollover.js
+            node scripts/earlyEndAndRollover.js
+
+cancelCurrentStageAndContinue - 
+            node scripts/cancelCurrentStageAndContinue.js
+
+- Claim and stake (for balances accrued via stake=false buys):            
+
+            # enable claim first
+            node scripts/enableClaim.js on
+            # then claim with stake
+            npx hardhat run scripts/claimStake.js --network sepolia
