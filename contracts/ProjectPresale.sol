@@ -171,13 +171,21 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
 
     error ZeroAddress();
     error Range(uint256 i);
+    error SoldOut();
     error Same();
     error Paused();
     error BelowMin();
     error NoStakeManager();
     error ClaimOff();
     error BadStage(); // usdPerToken==0 or capTokens==0
-
+    error NoStage();
+    error NothingToEnd();
+    error Corrupt();
+    error NoUSDT();
+    error None();
+    error Zero();
+    error InsufficientFutureStages();
+    error Oracle();
     error DebugDisabled();
 
     function getMyClaimable() external view returns (uint256) {
@@ -208,14 +216,29 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         hasPurchased = isBuyer[user];
     }
 
-    //////////
-    bool public debugViewsEnabled;
+    /////One-way “fuse” (owner can disable forever)/////
+    error DebugLocked();
+
+    bool public debugViewsEnabled; // default true on testnet, false on mainnet (your choice)
+    bool public debugViewsLocked; // when true, cannot re-enable
 
     event DebugViewsToggled(bool enabled);
+    event DebugViewsLocked();
 
     function setDebugViews(bool v) external onlyOwner {
+        if (debugViewsLocked) revert DebugLocked();
+        // idempotent shortcut
+        if (debugViewsEnabled == v) return;
         debugViewsEnabled = v;
         emit DebugViewsToggled(v);
+    }
+
+    // irreversible: turns OFF and locks
+    function lockDebugViews() external onlyOwner {
+        if (debugViewsLocked) return;
+        debugViewsEnabled = false;
+        debugViewsLocked = true;
+        emit DebugViewsLocked();
     }
 
     /*──────────────────────────────
@@ -335,7 +358,8 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         uint256 maxUsdRaise,
         bool paused
     ) external onlyOwner {
-        require(usdPerToken > 0 && capTokens > 0, "bad");
+        // require(usdPerToken > 0 && capTokens > 0, "bad");
+        if (usdPerToken == 0 || capTokens == 0) revert BadStage();
         Stage memory s = Stage({
             usdPerToken: usdPerToken,
             capTokens: capTokens,
@@ -410,13 +434,16 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
 
     function earlyEndAndRollover() external onlyOwner {
         uint256 i = currentStage;
-        require(i < _stages.length, "no stage");
+        // require(i < _stages.length, "no stage");
+        if (i >= _stages.length) revert NoStage();
         Stage storage cur = _stages[i];
-        require(!cur.paused, "paused");
+        // require(!cur.paused, "paused");
+        if (cur.paused) revert Paused();
 
         uint256 sold = cur.soldTokens;
         uint256 cap = cur.capTokens;
-        require(sold < cap, "nothing to end");
+        // require(sold < cap, "nothing to end");
+        if (sold >= cap) revert NothingToEnd();
 
         uint256 rollover = cap - sold;
 
@@ -437,12 +464,16 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
 
     function cancelCurrentStageAndContinue() external onlyOwner {
         uint256 i = currentStage;
-        require(i < _stages.length, "no stage");
+        // require(i < _stages.length, "no stage");
+        if (i >= _stages.length) revert NoStage();
+
         Stage storage cur = _stages[i];
 
         uint256 sold = cur.soldTokens;
         uint256 cap = cur.capTokens;
-        require(sold <= cap, "corrupt");
+        // require(sold <= cap, "corrupt");
+        if (sold > cap) revert Corrupt();
+
         uint256 rollover = cap > sold ? (cap - sold) : 0;
 
         // Lock current stage at sold
@@ -466,7 +497,8 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     function buyWithUsdt(uint256 usdtAmount, bool stake) external nonReentrant {
         // require(!globalPause, "paused");
         if (globalPause) revert Paused();
-        require(usdtAmount > 0, "no usdt");
+        // require(usdtAmount > 0, "no usdt");
+        if (usdtAmount == 0) revert NoUSDT();
 
         ////---Modify for gas save for M2--////
         // Cache storage variables in memory for this call
@@ -559,7 +591,9 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         // require(claimEnabled, "claim off");
         if (!claimEnabled) revert ClaimOff();
         uint256 amount = purchased[msg.sender];
-        require(amount > 0, "none");
+        // require(amount > 0, "none");
+        if (amount == 0) revert None();
+
         purchased[msg.sender] = 0;
 
         if (stake) {
@@ -664,6 +698,7 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     {
         // First pass: count how many stages will be touched
         uint256 i = currentStage;
+        Stage[] storage stages = _stages; // micro: cache the array base
         uint256 n = _stages.length;
         uint256 remaining = usdBudget;
         //--add new for gas save for 2 --////
@@ -681,15 +716,23 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         uint256 touches;
 
         while (i < n && remaining > 0) {
-            // Use a STORAGE reference once per stage. We read each field once.
-            Stage memory s = _stages[i];
-            if (s.paused) {
+            // STORAGE ref for the stage
+            Stage storage s = stages[i];
+
+            // Cache only the fields we need into stack locals (one SLOAD per field)
+            bool paused = s.paused;
+            uint256 sold = s.soldTokens;
+            uint256 cap = s.capTokens;
+
+            if (paused) {
                 // ++i;
                 unchecked {
                     ++i;
                 }
                 continue;
             }
+
+            uint256 leftTokens = cap - sold;
             /////////--Add new remove for M2--//////////
             // if (s.endTime != 0 && block.timestamp > s.endTime) {
             //     ++i;
@@ -697,33 +740,43 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
             // }
             // if (s.startTime != 0 && block.timestamp < s.startTime) break;
 
-            uint256 leftTokens = s.capTokens - s.soldTokens;
-            if (leftTokens == 0) {
-                // ++i;
+            // uint256 leftTokens = s.capTokens - s.soldTokens;
+            // if (leftTokens == 0) {
+            //     // ++i;
+            //     unchecked {
+            //         ++i;
+            //     }
+            //     continue;
+            // }
+
+            uint256 maxUsd = s.maxUsdRaise;
+            uint256 raised = s.usdRaised;
+
+            uint256 stageLeftUsd = (maxUsd > 0 && raised < maxUsd)
+                ? (maxUsd - raised)
+                : type(uint256).max;
+
+            if (stageLeftUsd == 0) {
                 unchecked {
                     ++i;
                 }
                 continue;
             }
 
-            uint256 stageLeftUsd = (s.maxUsdRaise > 0 &&
-                s.usdRaised < s.maxUsdRaise)
-                ? (s.maxUsdRaise - s.usdRaised)
-                : type(uint256).max;
-
+            uint256 price = s.usdPerToken; // cache price once
             uint256 usdThisStage = remaining < stageLeftUsd
                 ? remaining
                 : stageLeftUsd;
-            // uint256 tokensThisStage = (usdThisStage * _scale) / s.usdPerToken;
-            uint256 tokensThisStage = _tokensFromUsd(
-                usdThisStage,
-                s.usdPerToken,
-                _scale
-            );
+            uint256 tokensThisStage = (usdThisStage * _scale) / price;
+            // uint256 tokensThisStage = _tokensFromUsd(
+            //     usdThisStage,
+            //     price,
+            //     _scale
+            // );
 
             if (tokensThisStage > leftTokens) {
                 tokensThisStage = leftTokens;
-                usdThisStage = (tokensThisStage * s.usdPerToken) / _scale;
+                usdThisStage = (tokensThisStage * price) / _scale;
             }
             if (tokensThisStage == 0) break;
 
@@ -748,8 +801,8 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
                 ++i;
             }
         }
-        require(touches > 0, "sold out");
-
+        // require(touches > 0, "sold out");
+        if (touches == 0) revert SoldOut(); // "sold out"
         // Second pass: fill arrays
         // stageIdx = new uint256[](touches);
         // usdParts = new uint256[](touches);
@@ -836,7 +889,8 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
         uint256[] memory tokenParts
     ) internal {
         uint256 len = stageIdx.length;
-        for (uint256 k = 0; k < len; ++k) {
+        // for (uint256 k = 0; k < len; ++k) {
+        for (uint256 k = 0; k < len; ) {
             uint256 i = stageIdx[k];
             Stage storage s = _stages[i];
 
@@ -975,7 +1029,9 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     function _quoteUsdForTokensAcrossStages(
         uint256 tokensWanted
     ) internal view returns (uint256 usdTotal) {
-        require(tokensWanted > 0, "zero");
+        // require(tokensWanted > 0, "zero");
+        if (tokensWanted == 0) revert Zero();
+
         uint256 i = currentStage;
         uint256 n = _stages.length;
         uint256 remaining = tokensWanted;
@@ -1027,7 +1083,8 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
             }
         }
 
-        require(remaining == 0, "insufficient future stages");
+        // require(remaining == 0, "insufficient future stages");
+        if (remaining != 0) revert InsufficientFutureStages();
     }
 
     /*──────────────────────────────
@@ -1035,7 +1092,8 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
     ──────────────────────────────*/
     function _ethToUsd(uint256 weiAmt) internal view returns (uint256) {
         (, int256 answer, , , ) = oracle.latestRoundData();
-        require(answer > 0, "oracle");
+        // require(answer > 0, "oracle");
+        if (answer == 0) revert Oracle();
         uint8 d = oracle.decimals();
         uint256 price = uint256(answer);
         if (d >= 18) return (weiAmt * price) / (10 ** d);
@@ -1045,7 +1103,8 @@ contract ProjectPresale is Ownable, ReentrancyGuard {
 
     function _usdToEth(uint256 usdAmount) internal view returns (uint256) {
         (, int256 answer, , , ) = oracle.latestRoundData();
-        require(answer > 0, "oracle");
+        // require(answer > 0, "oracle");
+        if (answer == 0) revert Oracle();
         uint8 d = oracle.decimals();
         uint256 price = uint256(answer);
         if (d >= 18) return (usdAmount * (10 ** d)) / price;
